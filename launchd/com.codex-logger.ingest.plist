@@ -1,28 +1,32 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- TEMPLATE — prefer `codex-logger install-launchd`, which writes this file for
+     you with the real interpreter path, repo path, and home dir already filled
+     in. Only edit this by hand if you can't run the CLI: replace every
+     __PLACEHOLDER__ below with an absolute path for your machine. -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.kaikarlstrom.codex-logger</string>
+    <string>com.codex-logger.ingest</string>
 
     <!-- Ingest changed Codex rollout files every 5 minutes. Cheap: unchanged
          files are skipped by size+mtime, so this is near-zero work when idle. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <string>__PYTHON__</string>          <!-- e.g. output of `which python3` -->
         <string>-m</string>
         <string>codex_logger</string>
         <string>ingest</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/kaikarlstrom/kai-gtm-agents/codex-logger</string>
+    <string>__REPO_ROOT__</string>            <!-- the codex-logger checkout -->
 
     <key>EnvironmentVariables</key>
     <dict>
         <!-- default is ~/.codex-logger/codex.db; set a postgresql:// URL here to
-             co-locate with cc-logger's Neon warehouse. -->
+             co-locate with cc-logger's warehouse. -->
         <key>CODEX_LOGGER_DB</key>
         <string></string>
     </dict>
@@ -34,8 +38,8 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/kaikarlstrom/Library/Logs/codex-logger.out.log</string>
+    <string>__HOME__/Library/Logs/codex-logger.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/kaikarlstrom/Library/Logs/codex-logger.err.log</string>
+    <string>__HOME__/Library/Logs/codex-logger.err.log</string>
 </dict>
 </plist>

@@ -4,6 +4,7 @@
     python3 -m codex_logger sessions [--limit N] [--days N]
     python3 -m codex_logger inspect <session-id-prefix>
     python3 -m codex_logger stats [--days N]
+    python3 -m codex_logger install-launchd [--interval N] [--print]
 
 DB target: --db, or $CODEX_LOGGER_DB, else ~/.codex-logger/codex.db (SQLite).
 Pass a postgresql:// URL to co-locate with cc-logger.
@@ -11,10 +12,13 @@ Pass a postgresql:// URL to co-locate with cc-logger.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from .ingest import DEFAULT_SESSIONS_DIR, ingest_once, watch
 from .store import open_store
+
+LAUNCHD_LABEL = "com.codex-logger.ingest"
 
 
 def _fmt_int(n):
@@ -41,7 +45,7 @@ def cmd_sessions(a):
     rows = store.query(
         f"""SELECT session_id, model, originator, subagent_type, num_tool_calls,
                    total_tokens, started_at, cwd
-            FROM sessions {where}
+            FROM {store.table('sessions')} {where}
             ORDER BY started_at DESC LIMIT ?""",
         (*params, a.limit),
     )
@@ -62,7 +66,8 @@ def cmd_sessions(a):
 def cmd_inspect(a):
     store = open_store(a.db)
     rows = store.query(
-        "SELECT * FROM sessions WHERE session_id LIKE ? ORDER BY started_at DESC LIMIT 1",
+        f"SELECT * FROM {store.table('sessions')} WHERE session_id LIKE ? "
+        "ORDER BY started_at DESC LIMIT 1",
         (a.session + "%",),
     )
     if not rows:
@@ -85,14 +90,16 @@ def cmd_inspect(a):
           f"total={_fmt_int(s['total_tokens'])}")
     print(f"turns     {s['num_turns']}   tool_calls {s['num_tool_calls']}")
     calls = store.query(
-        "SELECT seq, tool_name, status, exit_code, arguments FROM tool_calls "
+        f"SELECT seq, turn_id, tool_name, status, exit_code, arguments "
+        f"FROM {store.table('tool_calls')} "
         "WHERE session_id=? ORDER BY seq", (s["session_id"],))
     if calls:
         print("\ntool calls:")
         for c in calls:
             arg = (c["arguments"] or "").replace("\n", " ")
-            print(f"  {c['seq']:>3} {(c['tool_name'] or '?'):16.16} "
-                  f"{(c['status'] or ''):8.8} {arg[:90]}")
+            turn = (c["turn_id"] or "")[:8]
+            print(f"  {c['seq']:>3} {turn:8.8} {(c['tool_name'] or '?'):16.16} "
+                  f"{(c['status'] or ''):8.8} {arg[:78]}")
     store.close()
 
 
@@ -107,17 +114,77 @@ def cmd_stats(a):
     for r in store.query(
         f"""SELECT model, COUNT(*) n, SUM(num_tool_calls) calls,
                    SUM(total_tokens) tok
-            FROM sessions {where} GROUP BY model ORDER BY tok DESC""", tuple(params)):
+            FROM {store.table('sessions')} {where}
+            GROUP BY model ORDER BY tok DESC""", tuple(params)):
         print(f"  {(r['model'] or '-'):20.20} {r['n']:>4} sessions "
               f"{_fmt_int(r['calls'] or 0):>7} calls  {_fmt_int(r['tok'] or 0):>11} tok")
     print("\ntop tools:")
     for r in store.query(
-        """SELECT tool_name, COUNT(*) n,
+        f"""SELECT tool_name, COUNT(*) n,
                   SUM(CASE WHEN status='failure' THEN 1 ELSE 0 END) fails
-           FROM tool_calls GROUP BY tool_name ORDER BY n DESC LIMIT 15"""):
+           FROM {store.table('tool_calls')}
+           GROUP BY tool_name ORDER BY n DESC LIMIT 15"""):
         print(f"  {(r['tool_name'] or '?'):20.20} {r['n']:>6}  "
               f"{r['fails'] or 0} failures")
     store.close()
+
+
+def _render_plist(interval: int, db: str) -> str:
+    """A launchd plist wired to THIS machine — real interpreter + repo path,
+    not a hardcoded template. Runs `-m codex_logger ingest` from the repo root."""
+    from xml.sax.saxutils import escape
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    home = os.path.expanduser("~")
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{escape(sys.executable)}</string>
+        <string>-m</string>
+        <string>codex_logger</string>
+        <string>ingest</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>{escape(repo_root)}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CODEX_LOGGER_DB</key>
+        <string>{escape(db)}</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>{int(interval)}</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{escape(home)}/Library/Logs/codex-logger.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>{escape(home)}/Library/Logs/codex-logger.err.log</string>
+</dict>
+</plist>
+"""
+
+
+def cmd_install_launchd(a):
+    db = a.db or os.environ.get("CODEX_LOGGER_DB", "")
+    plist = _render_plist(a.interval, db)
+    if a.print:
+        print(plist, end="")
+        return
+    dest_dir = os.path.expanduser("~/Library/LaunchAgents")
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, f"{LAUNCHD_LABEL}.plist")
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write(plist)
+    print(f"wrote {dest}")
+    print("load it with:")
+    print(f"  launchctl unload {dest} 2>/dev/null")
+    print(f"  launchctl load {dest}")
+    print(f"  launchctl start {LAUNCHD_LABEL}   # run once now")
 
 
 def main(argv=None):
@@ -148,6 +215,14 @@ def main(argv=None):
     pt = sub.add_parser("stats", help="token + tool aggregates")
     pt.add_argument("--days", type=int)
     pt.set_defaults(func=cmd_stats)
+
+    pl = sub.add_parser("install-launchd",
+                        help="generate a launchd plist wired to this machine")
+    pl.add_argument("--interval", type=int, default=300,
+                    help="seconds between ingests (default 300)")
+    pl.add_argument("--print", action="store_true",
+                    help="print the plist instead of writing it")
+    pl.set_defaults(func=cmd_install_launchd)
 
     a = p.parse_args(argv)
     a.func(a)

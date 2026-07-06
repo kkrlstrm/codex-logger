@@ -37,15 +37,21 @@ Claude Code — would silently miss a large part of what a Codex agent does:
 
 `codex-logger` bypasses hooks entirely. It reads the append-only **rollout JSONL
 files** Codex already writes to
-`~/.codex/sessions/YYYY/MM/DD/rollout-<id>.jsonl`, which record the complete event
-stream. That means it:
+`~/.codex/sessions/YYYY/MM/DD/rollout-<id>.jsonl`, giving you a queryable index of
+sessions, turns, tool calls, messages, models, tokens, and subagent relationships.
+That means it:
 
-- captures **everything** — shell, `apply_patch`, `write_stdin`, MCP calls,
-  subagents — not just the shell subset hooks expose,
+- covers the tools hooks don't — `apply_patch`, `write_stdin`, MCP calls, and
+  subagent activity, not just the shell subset,
 - works **retroactively** on sessions already on disk, with nothing installed into
   Codex and no change to your workflow,
 - runs **local-first** — a zero-config SQLite file by default, optional Postgres
   only if you want to.
+
+It reports what Codex reports and doesn't invent what it doesn't: a tool call's
+success/failure comes from the structured `*_end` event Codex emits for it
+(`exec_command_end.exit_code`, `patch_apply_end.success`), and a call whose outcome
+Codex never states is kept as `unknown` rather than guessed.
 
 > Codex changes fast. The hook behavior above is what was observed on the version
 > noted, not a permanent claim — the point is that reading rollout files is robust
@@ -71,8 +77,13 @@ Each rollout event maps to normalized columns:
 | `session_meta` | session id, `parent_thread_id` (subagent → parent link), `cwd`, `originator` (e.g. `codex_vscode`), `cli_version`, subagent type (e.g. `guardian`) |
 | `turn_context` | active `model` per turn (`gpt-5.4-mini`, `codex-auto-review`, …) |
 | `event_msg / token_count` | cumulative session tokens + **per-turn** usage (input / cached / output / reasoning / total) |
-| `response_item / function_call` + `function_call_output` | every tool call — `exec_command`, `apply_patch`, `write_stdin`, MCP — paired by `call_id`, with exit code + success/failure |
-| `response_item / message` | user prompts + assistant text |
+| `response_item / function_call` (+`_output`) | every tool call — `exec_command`, `apply_patch`, `write_stdin`, MCP — paired by `call_id`, stamped with its `turn_id` |
+| `event_msg / *_end` | authoritative outcome per call: `exec_command_end.exit_code`, `patch_apply_end.success` (a non-shell call with no reported status stays `unknown`) |
+| `response_item / message` | user prompts + assistant text (the `event_msg` `agent_message`/`user_message` events are the streamed duplicates — not re-ingested) |
+
+Because every tool call and message carries the `turn_id` it happened in, you can
+ask turn-level questions — which prompt triggered the failed patch, which subagent
+turn burned the most tokens, which model was active for a given MCP call.
 
 ## How it compares
 
@@ -87,14 +98,19 @@ version noted above, and may change in future Codex releases.</sub>
 
 ## Quick start
 
-Nothing to install for the default SQLite backend — it's pure stdlib.
+Nothing to install for the default SQLite backend — it's pure stdlib. Run it from
+a checkout, or install the `codex-logger` command:
 
 ```bash
-cd codex-logger
-python3 -m codex_logger ingest            # load all rollout files on disk
-python3 -m codex_logger sessions          # list recent sessions
-python3 -m codex_logger stats             # tokens by model + top tools
-python3 -m codex_logger inspect <id>      # one session in detail (id prefix ok)
+pipx install git+https://github.com/kkrlstrm/codex-logger    # or: pip install -e .
+```
+
+```bash
+codex-logger ingest             # load all rollout files on disk
+codex-logger sessions           # list recent sessions
+codex-logger stats              # tokens by model + top tools
+codex-logger inspect <id>       # one session in detail (id prefix ok)
+# equivalently, from a checkout without installing:  python3 -m codex_logger <cmd>
 ```
 
 `sessions` gives you the recent history at a glance:
@@ -118,21 +134,23 @@ time      ...T19:29:48Z -> ...T19:51:43Z
 tokens    in=182,140 cached=160,448 out=48,435 reasoning=27,051 total=257,626
 turns     6   tool_calls 41
 
-tool calls:
-    4 exec_command     success  {"cmd":"pytest -q","workdir":"~/projects/acme", ...}
-   12 apply_patch      success  {"changes":{"src/app.py":{"update": ...}}}
-   17 write_stdin      success  {"stdin":"y\n", ...}
-   26 mcp.fetch        success  {"url":"https://api.example.com/...", ...}
+tool calls:                       (seq · turn · tool · status · args)
+    4 019xxab1 exec_command     success  {"cmd":"pytest -q", ...}
+   12 019xxab1 apply_patch      success  {"changes":{"src/app.py": ...}}
+   17 019xxcd2 apply_patch      failure  {"changes":{"src/db.py": ...}}
+   26 019xxcd2 mcp.fetch        success  {"url":"https://api.example.com/...", ...}
 ```
-<sub>Illustrative session; paths and arguments elided.</sub>
+<sub>Illustrative session; paths and arguments elided. Each call shows the turn it
+ran in, and a status resolved from Codex's own `*_end` events.</sub>
 
 ## Commands
 
 ```bash
-python3 -m codex_logger ingest [--watch] [--interval N] [--force] [--verbose]
-python3 -m codex_logger sessions [--limit N] [--days N]
-python3 -m codex_logger inspect <session-id-prefix>
-python3 -m codex_logger stats [--days N]
+codex-logger ingest [--watch] [--interval N] [--force] [--verbose]
+codex-logger sessions [--limit N] [--days N]
+codex-logger inspect <session-id-prefix>
+codex-logger stats [--days N]
+codex-logger install-launchd [--interval N] [--print]   # macOS scheduling
 ```
 
 `ingest` is incremental — unchanged files are skipped by size+mtime, so re-running
@@ -162,7 +180,15 @@ ORDER BY failures DESC;
 SELECT subagent_type, COUNT(*) AS sessions, SUM(total_tokens) AS tokens
 FROM sessions
 GROUP BY subagent_type;
+
+-- Which turn triggered a failed patch (turn-level attribution)
+SELECT session_id, turn_id, tool_name, status
+FROM tool_calls
+WHERE tool_name = 'apply_patch' AND status = 'failure';
 ```
+
+<sub>On Postgres the tables are prefixed (`codex_sessions`, `codex_tool_calls`, …);
+on SQLite they're bare as shown. The CLI handles the difference for you.</sub>
 
 ## Storage
 
@@ -171,33 +197,51 @@ Default: SQLite at `~/.codex-logger/codex.db` — zero-config, works immediately
 To co-locate with cc-logger's Postgres/Neon warehouse (one dashboard across Claude
 Code + Codex), point it at a `postgresql://` URL. Tables are prefixed `codex_*` and
 every row carries `source='codex'`, so a `UNION` view against the cc-logger tables
-is trivial:
+is trivial — and all four commands work against Postgres, not just `ingest`:
 
 ```bash
 export CODEX_LOGGER_DB="postgresql://…/neondb?sslmode=require"
 pip install 'psycopg[binary]'
-python3 -m codex_logger ingest
+codex-logger ingest
+codex-logger stats          # queries codex_* automatically
 ```
 
 > The SQLite path is exercised end-to-end in the test suite. The Postgres backend
-> mirrors the same schema but isn't yet covered by a live-DB test — that's the next
-> hardening step.
+> mirrors the same schema (and the CLI routes to the prefixed tables), but isn't yet
+> covered by a live-DB integration test — that's the next hardening step.
 
 ## Schema
 
 `sessions`, `tool_calls`, `messages`, `turns`, plus `ingest_state` for incremental
-bookkeeping. See [`codex_logger/store.py`](codex_logger/store.py) for the DDL.
+bookkeeping. `tool_calls` and `messages` each carry a `turn_id`. See
+[`codex_logger/store.py`](codex_logger/store.py) for the DDL.
 
-## Run it on a schedule (launchd)
+## Privacy & security
+
+`codex-logger` stores your local Codex history verbatim: prompts, assistant
+messages, tool arguments, and command output — which can include file contents,
+internal URLs, and secrets that scrolled through a terminal. Treat the database as
+sensitive developer telemetry:
+
+- The default lives at `~/.codex-logger/codex.db` on your machine. Keep it there.
+- Don't commit it to a repo or sync it to shared/cloud storage.
+- If you point it at Postgres, use a private database with least-privilege access.
+
+Tool output is capped per row (200 KB) to bound runaway logs; a redaction mode for
+prompts/outputs is a planned option, not yet implemented.
+
+## Run it on a schedule (launchd, macOS)
 
 ```bash
-cp launchd/com.kaikarlstrom.codex-logger.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.kaikarlstrom.codex-logger.plist
-launchctl start com.kaikarlstrom.codex-logger      # run now
+codex-logger install-launchd --interval 300   # writes a plist wired to this machine
 ```
 
-Ingests changed rollout files every 5 minutes. Logs to
-`~/Library/Logs/codex-logger.{out,err}.log`.
+This generates `~/Library/LaunchAgents/com.codex-logger.ingest.plist` with your real
+Python path and repo path filled in (use `--print` to review it first), then tells
+you the `launchctl load` command to run. It ingests changed rollout files every
+5 minutes — near-zero work when idle — logging to
+`~/Library/Logs/codex-logger.{out,err}.log`. A hand-editable template lives in
+[`launchd/`](launchd/).
 
 ## Tests
 
@@ -206,9 +250,10 @@ python3 -m unittest discover -s tests -v
 ```
 
 Tests run against synthetic Codex `0.140`-style rollout events and cover session
-identity, model extraction, tool calls, exit status, token accounting, message
-extraction, malformed-line tolerance, and idempotent SQLite writes. The parser is
-fail-open — a malformed JSONL line is skipped, never fatal.
+identity, model extraction, tool calls, **status resolved from `*_end` events**,
+**per-turn attribution**, token accounting, message extraction, malformed-line
+tolerance, and idempotent SQLite writes. The parser is fail-open — a malformed JSONL
+line is skipped, never fatal. CI runs the suite on Python 3.10–3.13.
 
 ## Where this fits
 

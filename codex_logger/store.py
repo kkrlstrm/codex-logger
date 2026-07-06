@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     session_id  TEXT,
     call_id     TEXT,
     seq         INTEGER,
+    turn_id     TEXT,
     tool_name   TEXT,
     arguments   TEXT,
     output      TEXT,
@@ -58,6 +59,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 CREATE TABLE IF NOT EXISTS messages (
     session_id  TEXT,
     seq         INTEGER,
+    turn_id     TEXT,
     role        TEXT,
     phase       TEXT,
     text        TEXT,
@@ -162,26 +164,27 @@ class SQLiteStore:
         for tc in s.tool_calls:
             self.conn.execute(
                 """INSERT INTO tool_calls(
-                    session_id, call_id, seq, tool_name, arguments, output,
-                    exit_code, status, ts)
-                   VALUES(?,?,?,?,?,?,?,?,?)
+                    session_id, call_id, seq, turn_id, tool_name, arguments,
+                    output, exit_code, status, ts)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(session_id, call_id) DO UPDATE SET
-                    seq=excluded.seq, tool_name=excluded.tool_name,
+                    seq=excluded.seq, turn_id=excluded.turn_id,
+                    tool_name=excluded.tool_name,
                     arguments=excluded.arguments, output=excluded.output,
                     exit_code=excluded.exit_code, status=excluded.status,
                     ts=excluded.ts""",
-                (s.session_id, tc.call_id, tc.seq, tc.tool_name,
+                (s.session_id, tc.call_id, tc.seq, tc.turn_id, tc.tool_name,
                  _clip(tc.arguments), _clip(tc.output), tc.exit_code,
                  tc.status, tc.ts),
             )
         for m in s.messages:
             self.conn.execute(
-                """INSERT INTO messages(session_id, seq, role, phase, text, ts)
-                   VALUES(?,?,?,?,?,?)
+                """INSERT INTO messages(session_id, seq, turn_id, role, phase, text, ts)
+                   VALUES(?,?,?,?,?,?,?)
                    ON CONFLICT(session_id, seq) DO UPDATE SET
-                    role=excluded.role, phase=excluded.phase,
-                    text=excluded.text, ts=excluded.ts""",
-                (s.session_id, m.seq, m.role, m.phase, _clip(m.text), m.ts),
+                    turn_id=excluded.turn_id, role=excluded.role,
+                    phase=excluded.phase, text=excluded.text, ts=excluded.ts""",
+                (s.session_id, m.seq, m.turn_id, m.role, m.phase, _clip(m.text), m.ts),
             )
         for t in s.turns:
             self.conn.execute(
@@ -199,6 +202,11 @@ class SQLiteStore:
                  t.cached_input_tokens, t.output_tokens, t.reasoning_tokens,
                  t.total_tokens, t.ts),
             )
+
+    def table(self, name: str) -> str:
+        """Physical table name for a logical one. SQLite uses bare names;
+        Postgres prefixes `codex_` to share a warehouse with cc-logger."""
+        return name
 
     def commit(self):
         self.conn.commit()
