@@ -1,0 +1,20 @@
+[project]
+name = "codex-logger"
+version = "0.1.0"
+description = "Telemetry for OpenAI Codex CLI, read from ~/.codex/sessions rollout files. The Codex sibling of cc-logger."
+requires-python = ">=3.10"
+dependencies = []           # SQLite path is pure stdlib
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1"]   # only needed for a postgresql:// target
+dev = ["pytest>=7"]
+
+[project.scripts]
+codex-logger = "codex_logger.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["codex_logger"]
