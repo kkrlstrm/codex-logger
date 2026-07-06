@@ -1,7 +1,7 @@
 [project]
 name = "codex-logger"
 version = "0.1.0"
-description = "Telemetry for OpenAI Codex CLI, read from ~/.codex/sessions rollout files. The Codex sibling of cc-logger."
+description = "Local black box recorder for OpenAI Codex CLI: reconstructs full agent runs from ~/.codex/sessions rollout files into a queryable SQLite/Postgres database. Captures what hooks miss (apply_patch, MCP, subagents)."
 requires-python = ">=3.10"
 dependencies = []           # SQLite path is pure stdlib
 
