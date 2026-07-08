@@ -35,12 +35,13 @@ CREATE TABLE IF NOT EXISTS codex_sessions (
     ingested_at       TIMESTAMPTZ DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS codex_tool_calls (
-    session_id TEXT, call_id TEXT, seq INTEGER, tool_name TEXT,
+    session_id TEXT, call_id TEXT, seq INTEGER, turn_id TEXT, tool_name TEXT,
     arguments TEXT, output TEXT, exit_code INTEGER, status TEXT, ts TIMESTAMPTZ,
     PRIMARY KEY (session_id, call_id)
 );
 CREATE TABLE IF NOT EXISTS codex_messages (
-    session_id TEXT, seq INTEGER, role TEXT, phase TEXT, text TEXT, ts TIMESTAMPTZ,
+    session_id TEXT, seq INTEGER, turn_id TEXT, role TEXT, phase TEXT, text TEXT,
+    ts TIMESTAMPTZ,
     PRIMARY KEY (session_id, seq)
 );
 CREATE TABLE IF NOT EXISTS codex_turns (
@@ -106,20 +107,23 @@ class PostgresStore:
                  s.total_tokens, s.rollout_path))
             for tc in s.tool_calls:
                 cur.execute(
-                    """INSERT INTO codex_tool_calls(session_id,call_id,seq,tool_name,arguments,
-                        output,exit_code,status,ts) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """INSERT INTO codex_tool_calls(session_id,call_id,seq,turn_id,tool_name,
+                        arguments,output,exit_code,status,ts)
+                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                        ON CONFLICT(session_id,call_id) DO UPDATE SET seq=EXCLUDED.seq,
-                        tool_name=EXCLUDED.tool_name, arguments=EXCLUDED.arguments,
+                        turn_id=EXCLUDED.turn_id, tool_name=EXCLUDED.tool_name,
+                        arguments=EXCLUDED.arguments,
                         output=EXCLUDED.output, exit_code=EXCLUDED.exit_code,
                         status=EXCLUDED.status, ts=EXCLUDED.ts""",
-                    (s.session_id, tc.call_id, tc.seq, tc.tool_name, _clip(tc.arguments),
-                     _clip(tc.output), tc.exit_code, tc.status, tc.ts))
+                    (s.session_id, tc.call_id, tc.seq, tc.turn_id, tc.tool_name,
+                     _clip(tc.arguments), _clip(tc.output), tc.exit_code, tc.status, tc.ts))
             for m in s.messages:
                 cur.execute(
-                    """INSERT INTO codex_messages(session_id,seq,role,phase,text,ts)
-                       VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(session_id,seq) DO UPDATE SET
-                        role=EXCLUDED.role, phase=EXCLUDED.phase, text=EXCLUDED.text, ts=EXCLUDED.ts""",
-                    (s.session_id, m.seq, m.role, m.phase, _clip(m.text), m.ts))
+                    """INSERT INTO codex_messages(session_id,seq,turn_id,role,phase,text,ts)
+                       VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(session_id,seq) DO UPDATE SET
+                        turn_id=EXCLUDED.turn_id, role=EXCLUDED.role, phase=EXCLUDED.phase,
+                        text=EXCLUDED.text, ts=EXCLUDED.ts""",
+                    (s.session_id, m.seq, m.turn_id, m.role, m.phase, _clip(m.text), m.ts))
             for t in s.turns:
                 cur.execute(
                     """INSERT INTO codex_turns(session_id,turn_id,model,input_tokens,
@@ -131,6 +135,11 @@ class PostgresStore:
                         total_tokens=EXCLUDED.total_tokens, ts=EXCLUDED.ts""",
                     (s.session_id, t.turn_id, t.model, t.input_tokens, t.cached_input_tokens,
                      t.output_tokens, t.reasoning_tokens, t.total_tokens, t.ts))
+
+    def table(self, name: str) -> str:
+        """Physical table name — Postgres prefixes `codex_` so Codex telemetry
+        shares a warehouse with cc-logger without colliding on `sessions` etc."""
+        return "codex_" + name
 
     def commit(self):
         self.conn.commit()

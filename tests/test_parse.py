@@ -40,7 +40,7 @@ ROLLOUT = [
     {"timestamp": "2026-07-06T13:34:12.500Z", "type": "response_item",
      "payload": {"type": "function_call_output", "call_id": "call_B",
                  "output": "Process exited with code 1"}},
-    {"timestamp": "2026-07-06T13:34:13.000Z", "type": "event_msg",
+    {"timestamp": "2026-07-06T13:34:12.550Z", "type": "event_msg",
      "payload": {"type": "token_count", "info": {
          "total_token_usage": {"input_tokens": 100, "cached_input_tokens": 10,
                                "output_tokens": 20, "reasoning_output_tokens": 5,
@@ -48,6 +48,26 @@ ROLLOUT = [
          "last_token_usage": {"input_tokens": 100, "cached_input_tokens": 10,
                               "output_tokens": 20, "reasoning_output_tokens": 5,
                               "total_tokens": 120}}}},
+    # --- turn 2: outcomes come from structured *_end events, not scraped text ---
+    {"timestamp": "2026-07-06T13:34:12.600Z", "type": "event_msg",
+     "payload": {"type": "task_started", "turn_id": "turn-2"}},
+    {"timestamp": "2026-07-06T13:34:12.650Z", "type": "response_item",
+     "payload": {"type": "function_call", "name": "exec_command",
+                 "arguments": "{\"cmd\":\"false\"}", "call_id": "call_D"}},
+    # exec_command_end carries a real exit_code; note there is NO
+    # function_call_output with a "Process exited" marker for this call.
+    {"timestamp": "2026-07-06T13:34:12.680Z", "type": "event_msg",
+     "payload": {"type": "exec_command_end", "call_id": "call_D",
+                 "turn_id": "turn-2", "exit_code": 2, "status": "completed",
+                 "aggregated_output": "boom\n"}},
+    {"timestamp": "2026-07-06T13:34:12.700Z", "type": "response_item",
+     "payload": {"type": "function_call", "name": "apply_patch",
+                 "arguments": "{\"input\":\"*** Begin Patch\"}", "call_id": "call_C"}},
+    # apply_patch reports success via patch_apply_end; no exit code anywhere.
+    {"timestamp": "2026-07-06T13:34:12.750Z", "type": "event_msg",
+     "payload": {"type": "patch_apply_end", "call_id": "call_C",
+                 "turn_id": "turn-2", "success": True, "status": "completed",
+                 "stdout": "", "stderr": ""}},
 ]
 
 
@@ -88,6 +108,21 @@ class TestParse(unittest.TestCase):
         self.assertEqual(by["call_B"].exit_code, 1)
         self.assertEqual(by["call_B"].status, "failure")
 
+    def test_status_from_structured_end_events(self):
+        # These outcomes are ONLY knowable from exec_command_end / patch_apply_end
+        # — the old exit-code scrape would have left both as "unknown".
+        by = {c.call_id: c for c in self.s.tool_calls}
+        self.assertEqual(by["call_D"].exit_code, 2)
+        self.assertEqual(by["call_D"].status, "failure")   # exec_command_end
+        self.assertEqual(by["call_C"].status, "success")   # patch_apply_end.success
+
+    def test_turn_attribution(self):
+        by = {c.call_id: c for c in self.s.tool_calls}
+        self.assertEqual(by["call_A"].turn_id, "turn-1")
+        self.assertEqual(by["call_D"].turn_id, "turn-2")
+        self.assertEqual(by["call_C"].turn_id, "turn-2")
+        self.assertTrue(all(m.turn_id == "turn-1" for m in self.s.messages))
+
     def test_tokens(self):
         self.assertEqual(self.s.total_tokens, 120)
         self.assertEqual(self.s.reasoning_tokens, 5)
@@ -119,9 +154,13 @@ class TestStore(unittest.TestCase):
             store.upsert_session(s)  # second time must not duplicate
             store.commit()
             rows = store.query("SELECT COUNT(*) c FROM tool_calls")
-            self.assertEqual(rows[0]["c"], 2)
+            self.assertEqual(rows[0]["c"], 4)
             srow = store.query("SELECT total_tokens FROM sessions")[0]
             self.assertEqual(srow["total_tokens"], 120)
+            # turn_id must survive the round-trip (turn-level attribution)
+            trow = store.query(
+                "SELECT turn_id FROM tool_calls WHERE call_id='call_C'")[0]
+            self.assertEqual(trow["turn_id"], "turn-2")
             store.close()
         finally:
             os.remove(dbpath)

@@ -13,6 +13,13 @@ append-only. Each line is a JSON object with a top-level `type`:
 Tool calls are function_call / function_call_output pairs matched by call_id and
 cover every tool (exec_command, apply_patch, shell, MCP) — not shell-only, which
 is the whole reason this reads the rollout file instead of PreToolUse hooks.
+Success/failure is resolved from the structured `*_end` event_msg events Codex
+emits per call (`exec_command_end.exit_code`, `patch_apply_end.success`); a tool
+whose outcome Codex doesn't report is preserved as `unknown` rather than guessed.
+
+Assistant + user text is taken from `response_item`/`message` (the durable record).
+The `event_msg`/`agent_message`/`user_message` events are the streamed duplicates of
+that same text, so they are intentionally not re-ingested (no double-counting).
 
 Pure stdlib, fail-open: a malformed line is skipped, never raised.
 """
@@ -48,6 +55,7 @@ class ToolCall:
     output: Optional[str] = None
     exit_code: Optional[int] = None
     status: str = "pending"  # pending | success | failure | unknown
+    turn_id: Optional[str] = None
     ts: Optional[str] = None
     seq: int = 0
 
@@ -57,6 +65,7 @@ class Message:
     role: str
     text: str
     phase: Optional[str] = None
+    turn_id: Optional[str] = None
     ts: Optional[str] = None
     seq: int = 0
 
@@ -166,6 +175,18 @@ def parse_session(path: str) -> Optional[Session]:
     turns: dict[str, Turn] = {}
     saw_any = False
 
+    def touch_call(cid: str) -> ToolCall:
+        """Get-or-create the ToolCall for call_id, stamping the active turn."""
+        nonlocal seq
+        tc = calls.get(cid)
+        if tc is None:
+            seq += 1
+            tc = ToolCall(call_id=cid, seq=seq, turn_id=last_turn_id)
+            calls[cid] = tc
+        elif tc.turn_id is None:
+            tc.turn_id = last_turn_id
+        return tc
+
     for obj in iter_lines(path):
         saw_any = True
         typ = obj.get("type")
@@ -226,13 +247,34 @@ def parse_session(path: str) -> Optional[Session]:
                     t.output_tokens = last.get("output_tokens", 0)
                     t.reasoning_tokens = last.get("reasoning_output_tokens", 0)
                     t.total_tokens = last.get("total_tokens", 0)
+            elif pt == "exec_command_end":
+                # Authoritative shell outcome — a real exit_code, not scraped text.
+                cid = payload.get("call_id")
+                if cid:
+                    tc = touch_call(cid)
+                    ec = payload.get("exit_code")
+                    if ec is not None:
+                        tc.exit_code = ec
+                        tc.status = "success" if ec == 0 else "failure"
+                    if not tc.output:
+                        tc.output = payload.get("aggregated_output") or tc.output
+            elif pt == "patch_apply_end":
+                # apply_patch reports a success bool (and a 'declined' status when
+                # a guard rejects it) — the only reliable signal for a patch call.
+                cid = payload.get("call_id")
+                if cid:
+                    tc = touch_call(cid)
+                    succ = payload.get("success")
+                    if succ is not None:
+                        tc.status = "success" if succ else "failure"
+                    if not tc.output:
+                        tc.output = payload.get("stderr") or payload.get("stdout") or tc.output
 
         elif typ == "response_item":
             pt = payload.get("type")
             if pt in ("function_call", "custom_tool_call"):
                 cid = payload.get("call_id") or payload.get("id") or f"_noid_{seq}"
-                seq += 1
-                tc = calls.setdefault(cid, ToolCall(call_id=cid, seq=seq))
+                tc = touch_call(cid)
                 tc.tool_name = payload.get("name") or tc.tool_name
                 args = payload.get("arguments")
                 if args is None and "input" in payload:
@@ -246,14 +288,16 @@ def parse_session(path: str) -> Optional[Session]:
                 out = payload.get("output")
                 if isinstance(out, (dict, list)):
                     out = json.dumps(out)
-                tc = calls.setdefault(cid, ToolCall(call_id=cid, seq=seq))
+                tc = touch_call(cid)
                 tc.output = out
+                # exit-code scrape is a fallback only — never downgrade a status
+                # already resolved by an exec_command_end / patch_apply_end event.
                 code = _parse_exit_code(out or "")
-                tc.exit_code = code
-                if code is None:
-                    tc.status = "unknown"
-                else:
+                if code is not None:
+                    tc.exit_code = code
                     tc.status = "success" if code == 0 else "failure"
+                elif tc.status == "pending":
+                    tc.status = "unknown"
             elif pt == "message":
                 role = payload.get("role")
                 if role in ("assistant", "user"):
@@ -261,8 +305,8 @@ def parse_session(path: str) -> Optional[Session]:
                     if text.strip():
                         seq += 1
                         s.messages.append(Message(
-                            role=role, text=text,
-                            phase=payload.get("phase"), ts=ts, seq=seq,
+                            role=role, text=text, phase=payload.get("phase"),
+                            turn_id=last_turn_id, ts=ts, seq=seq,
                         ))
 
     if not saw_any or not s.session_id:
