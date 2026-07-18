@@ -1,5 +1,8 @@
 # codex-logger
 
+<!-- portfolio-status -->
+**Status:** Production-used — I run this against my own live agent workflows. · **Layer:** Runtime observability · **[Portfolio map ›](https://github.com/kkrlstrm)**
+
 **The local black box recorder for OpenAI Codex CLI** — full-fidelity local
 observability, read from the files Codex already writes.
 
@@ -272,3 +275,16 @@ there is Codex's live hook-firing matrix, not this logger.
 ## License
 
 AGPL-3.0-or-later. See [LICENSE](LICENSE).
+
+---
+
+<!-- portfolio-footer -->
+## Where this fits
+
+Part of a portfolio of **governed, AI-native GTM systems** — reference implementations and reusable patterns extracted from a private production stack. In that system this is the flight recorder for the OpenAI Codex CLI.
+
+**Full portfolio map → [github.com/kkrlstrm](https://github.com/kkrlstrm)**
+
+Works with:
+- [codex-guard](https://github.com/kkrlstrm/codex-guard) — the control surface that acts on what this observes
+- [cc-logger](https://github.com/kkrlstrm/cc-logger) — the Claude Code sibling
