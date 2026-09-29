@@ -1,11 +1,11 @@
 # codex-logger
 
 <!-- portfolio-status -->
-**Status:** Production-used — I run this against my own live agent workflows. · **Layer:** Runtime observability · **[Portfolio map ›](https://github.com/kkrlstrm)**
+**Status:** Production-used — I run this against my own live agent workflows. · **Layer:** Observability · **[Portfolio map ›](https://github.com/kkrlstrm)**
 
 > **Now part of [callusguard](https://github.com/kkrlstrm/callusguard).**
 > codex-logger is the Codex half of the `record` stage in a five-stage loop — `record → derive → guard → verify → prune` —
-> exposed there as `callus record ingest`. callusguard ships all five stages for both Claude Code and Codex, as one install. This repo stays up and works; callusguard is where the loop closes.
+> exposed there as `callus record ingest`. callusguard ships all five stages for both Claude Code and Codex, as one install. This repo stays up and works; callusguard is the maintained guardrail package; the wider learning loop, which also proposes skills, sub-agents and routes and measures each change against a control, continues in [runtune](https://github.com/kkrlstrm/runtune).
 
 **The local black box recorder for OpenAI Codex CLI** — full-fidelity local
 observability, read from the files Codex already writes.
